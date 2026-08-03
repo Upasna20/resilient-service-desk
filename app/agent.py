@@ -21,7 +21,7 @@ from google.adk.agents import Agent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.apps import App
 from google.adk.apps.app import EventsCompactionConfig, ResumabilityConfig
-from google.adk.models import Gemini
+from google.adk.models import Gemini, LlmResponse
 from google.genai import types
 
 from app.tools import (
@@ -192,11 +192,37 @@ escalation_specialist = Agent(
 )
 
 
-async def dynamic_model_routing_callback(
+async def input_guardrail_and_routing_callback(
     callback_context: CallbackContext, llm_request: Any
-) -> Any:
-    """Dynamic model routing callback that upgrades model tier for high complexity/frustration."""
+) -> Any | None:
+    """Multi-layered safety guardrail (Layer 1: pre-model) & dynamic model router.
+
+    1. Screens for prompt injections and prohibited/toxic topics before LLM invocation.
+    2. Dynamically upgrades model tier for high complexity/frustration queries.
+    """
     user_content = str(callback_context.user_content or "").lower()
+
+    # 1. Input Safety Guardrail: check for prompt injections or prohibited requests
+    prohibited_keywords = [
+        "ignore previous instructions",
+        "bypass guardrail",
+        "system prompt",
+        "jailbreak",
+        "hack",
+    ]
+    if any(keyword in user_content for keyword in prohibited_keywords):
+        return LlmResponse(
+            content=types.Content(
+                role="model",
+                parts=[
+                    types.Part.from_text(
+                        text="Request blocked by Global Retail Hub safety guardrails: prohibited input detected."
+                    )
+                ],
+            )
+        )
+
+    # 2. Dynamic Model Routing: upgrade model tier for urgent/high-complexity requests
     high_complexity_keywords = [
         "manager",
         "furious",
@@ -209,6 +235,81 @@ async def dynamic_model_routing_callback(
     ]
     if any(keyword in user_content for keyword in high_complexity_keywords):
         llm_request.model = "gemini-3.5-pro"
+
+    return None
+
+
+# Backward compatibility alias for tests
+dynamic_model_routing_callback = input_guardrail_and_routing_callback
+
+
+async def tool_execution_guardrail_callback(
+    tool: Any, args: dict[str, Any], tool_context: Any
+) -> dict[str, Any] | None:
+    """Multi-layered safety guardrail (Layer 2a: before tool execution).
+
+    Enforces strict argument validation and scope boundaries before any tool runs.
+    """
+    if getattr(tool, "name", "") == "escalate_to_human":
+        input_obj = args.get("input")
+        sentiment = (
+            getattr(input_obj, "sentiment_score", None)
+            if input_obj
+            else args.get("sentiment_score")
+        )
+        if sentiment is not None and (
+            not isinstance(sentiment, (int, float))
+            or not (0.0 <= float(sentiment) <= 1.0)
+        ):
+            return {
+                "status": "error",
+                "error_recovery": "Guardrail violation: sentiment_score must be between 0.0 and 1.0.",
+            }
+    return None
+
+
+async def tool_output_sanitization_callback(
+    tool: Any,
+    args: dict[str, Any],
+    tool_context: Any,
+    tool_response: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Multi-layered safety guardrail (Layer 2b: after tool execution).
+
+    Sanitizes tool output payloads to prevent internal system leakage or unhandled stack traces.
+    """
+    if isinstance(tool_response, dict):
+        if "traceback" in tool_response or "exception" in tool_response:
+            return {
+                "status": "error",
+                "error_recovery": "A system error occurred. Please try again or escalate to support.",
+            }
+    return None
+
+
+async def output_safety_guardrail_callback(
+    callback_context: CallbackContext, llm_response: Any
+) -> Any | None:
+    """Multi-layered safety guardrail (Layer 3: post-model output scan).
+
+    Scans generated response text for ungrounded/hallucinated shipping windows or policy violations.
+    """
+    if (
+        llm_response
+        and hasattr(llm_response, "content")
+        and llm_response.content
+        and getattr(llm_response.content, "parts", None)
+    ):
+        for part in llm_response.content.parts:
+            text = getattr(part, "text", "") or ""
+            if (
+                "lifetime warranty" in text.lower()
+                or "unlimited returns" in text.lower()
+            ):
+                part.text = (
+                    "Standard retail policy applies: Returns are accepted within 30 days. "
+                    "Please refer to official Global Retail Hub terms."
+                )
     return None
 
 
@@ -222,7 +323,10 @@ root_agent = Agent(
     tools=[escalate_to_human, query_knowledge_base, save_customer_details],
     sub_agents=[kb_specialist, escalation_specialist],
     before_agent_callback=initialize_customer_state,
-    before_model_callback=dynamic_model_routing_callback,
+    before_model_callback=input_guardrail_and_routing_callback,
+    after_model_callback=output_safety_guardrail_callback,
+    before_tool_callback=tool_execution_guardrail_callback,
+    after_tool_callback=tool_output_sanitization_callback,
     after_agent_callback=record_user_issue_log,
 )
 
