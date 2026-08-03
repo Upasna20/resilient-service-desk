@@ -27,6 +27,8 @@ from app.agent import (
 )
 from app.app_utils.services import get_session_service
 from app.tools import (
+    CustomerDetailsInput,
+    EscalationInput,
     escalate_to_human,
     query_knowledge_base,
     save_customer_details,
@@ -53,7 +55,7 @@ def test_root_agent_config() -> None:
     assert app.events_compaction_config.overlap_size == 1
 
     # Verify system instructions content and guardrails
-    instruction = root_agent.instruction
+    instruction = str(root_agent.instruction)
     assert "Lead Support Orchestrator" in instruction
     assert "Global Retail Hub" in instruction
     assert "Customer details currently stored in session state" in instruction
@@ -67,12 +69,18 @@ def test_root_agent_config() -> None:
 
 def test_save_customer_details_state_persistence() -> None:
     """Verify that save_customer_details writes into tool_context.state."""
+
     class DummyContext:
         def __init__(self) -> None:
             self.state: dict[str, Any] = {}
 
     ctx = DummyContext()
-    res = save_customer_details("CUST-12345", "Alice", ctx, email="alice@example.com")
+    res = save_customer_details(
+        CustomerDetailsInput(
+            user_id="CUST-12345", name="Alice", email="alice@example.com"
+        ),
+        tool_context=ctx,
+    )
     assert res["status"] == "success"
     assert ctx.state["customer_details"] == {
         "user_id": "CUST-12345",
@@ -83,12 +91,18 @@ def test_save_customer_details_state_persistence() -> None:
 
 def test_escalate_to_human_state_persistence() -> None:
     """Verify that escalate_to_human updates user_id in tool_context.state when provided."""
+
     class DummyContext:
         def __init__(self) -> None:
             self.state: dict[str, Any] = {"customer_details": {}}
 
     ctx = DummyContext()
-    res = escalate_to_human("CUST-99999", "Broken item", 0.1, tool_context=ctx)
+    res = escalate_to_human(
+        EscalationInput(
+            user_id="CUST-99999", issue_summary="Broken item", sentiment_score=0.1
+        ),
+        tool_context=ctx,
+    )
     assert res["status"] == "success"
     assert ctx.state["customer_details"]["user_id"] == "CUST-99999"
 
@@ -96,6 +110,7 @@ def test_escalate_to_human_state_persistence() -> None:
 @pytest.mark.asyncio
 async def test_record_user_issue_log_callback() -> None:
     """Verify after_agent_callback captures turn summary into user-scoped persistent state."""
+
     class DummyCallbackContext:
         def __init__(self) -> None:
             self.state: dict[str, Any] = {
@@ -129,6 +144,7 @@ def test_get_session_service_database() -> None:
 @pytest.mark.asyncio
 async def test_consolidate_user_memory() -> None:
     """Verify that consolidate_user_memory summarizes issue logs into user:consolidated_memory."""
+
     class DummyCallbackContext:
         def __init__(self) -> None:
             self.state: dict[str, Any] = {
@@ -160,6 +176,7 @@ async def test_consolidate_user_memory() -> None:
 @pytest.mark.asyncio
 async def test_schedule_memory_consolidation() -> None:
     """Verify that schedule_memory_consolidation schedules an async background task."""
+
     class DummyCallbackContext:
         def __init__(self) -> None:
             self.state: dict[str, Any] = {
@@ -179,4 +196,3 @@ async def test_schedule_memory_consolidation() -> None:
     await task
     assert "user:consolidated_memory" in ctx.state
     assert ctx.state["user:consolidated_memory"]["issue_count"] == 1
-

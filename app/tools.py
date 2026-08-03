@@ -46,10 +46,8 @@ class CustomerDetailsInput(BaseModel):
 
 # 🔧 Tool 1: Escalate to Human (Descriptive Naming)
 def escalate_to_human(
-    user_id: str,
-    issue_summary: str,
-    sentiment_score: float,
-    tool_context: ToolContext = None,
+    input: EscalationInput,
+    tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
     """Escalates high-priority, urgent, or frustrated customer tickets to a human support queue.
 
@@ -57,16 +55,14 @@ def escalate_to_human(
     or asks for things outside the agent's boundaries (like cancellation).
 
     Args:
-        user_id (str): Customer ID.
-        issue_summary (str): Summary of the problem.
-        sentiment_score (float): Score from 0.0 (angry) to 1.0 (happy).
+        input (EscalationInput): The escalation input details containing user_id, issue_summary, and sentiment_score.
         tool_context (ToolContext, optional): Injected session tool context.
 
     Returns:
         dict[str, Any]: Confirmation status and the generated Ticket ID.
     """
     # 🚨 Guided Error Handling Example (Rubric Category 1)
-    if not user_id.startswith("CUST-"):
+    if not input.user_id.startswith("CUST-"):
         return {
             "status": "error",
             "error_recovery": "Invalid User ID format. Ensure it starts with 'CUST-'. Please ask the user to verify their ID.",
@@ -74,25 +70,25 @@ def escalate_to_human(
 
     if tool_context is not None and hasattr(tool_context, "state"):
         customer_details = tool_context.state.get("customer_details", {})
-        customer_details["user_id"] = user_id
+        customer_details["user_id"] = input.user_id
         tool_context.state["customer_details"] = customer_details
 
     return {
         "status": "success",
-        "ticket_id": f"TICKET-{user_id[-4:]}-URGENT",
+        "ticket_id": f"TICKET-{input.user_id[-4:]}-URGENT",
         "message": "Ticket successfully enqueued in the Human Support Queue.",
     }
 
 
 # 🔧 Tool 2: Query Knowledge Base
-def query_knowledge_base(search_query: str) -> dict[str, Any]:
+def query_knowledge_base(input: KBQueryInput) -> dict[str, Any]:
     """Searches the internal Knowledge Base (FAQ) for Global Retail Hub policies and procedures.
 
     Use this tool to find standard answers for shipping times, return policies,
     or general informational queries.
 
     Args:
-        search_query (str): The search query based on the customer's question.
+        input (KBQueryInput): The knowledge base search query input.
 
     Returns:
         dict[str, Any]: The search results or a guided recovery message if nothing is found.
@@ -100,7 +96,7 @@ def query_knowledge_base(search_query: str) -> dict[str, Any]:
     in_scope_topics = ["shipping", "return", "refund", "policy", "hours", "tracking"]
 
     # 🚨 Out of Scope Guardrail
-    if not any(topic in search_query.lower() for topic in in_scope_topics):
+    if not any(topic in input.search_query.lower() for topic in in_scope_topics):
         return {
             "status": "out_of_scope",
             "result": None,
@@ -112,7 +108,7 @@ def query_knowledge_base(search_query: str) -> dict[str, Any]:
         }
 
     # 🚨 System Outage Simulation (Resilience)
-    if "error" in search_query.lower():
+    if "error" in input.search_query.lower():
         return {
             "status": "error",
             "error_recovery": "The Knowledge Base is temporarily offline. Please advise the user of the outage and escalate to a human if urgent.",
@@ -127,22 +123,21 @@ def query_knowledge_base(search_query: str) -> dict[str, Any]:
 
 # 🔧 Tool 3: Save Customer Details to Session State
 def save_customer_details(
-    user_id: str, name: str, tool_context: ToolContext, email: str = ""
+    input: CustomerDetailsInput,
+    tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
     """Saves customer details into the session state so they persist across event compactions.
 
     Use this tool IMMEDIATELY whenever the customer provides their name, email, or customer ID.
 
     Args:
-        user_id (str): Customer ID starting with 'CUST-'.
-        name (str): The customer's name.
-        email (str, optional): The customer's email address.
-        tool_context (ToolContext): Injected session tool context.
+        input (CustomerDetailsInput): Customer details containing user_id, name, and optional email.
+        tool_context (ToolContext, optional): Injected session tool context.
 
     Returns:
         dict[str, Any]: Confirmation status and stored customer details.
     """
-    if not user_id.startswith("CUST-"):
+    if not input.user_id.startswith("CUST-"):
         return {
             "status": "error",
             "error_recovery": (
@@ -151,8 +146,8 @@ def save_customer_details(
             ),
         }
 
-    details = {"user_id": user_id, "name": name, "email": email}
-    if hasattr(tool_context, "state"):
+    details = {"user_id": input.user_id, "name": input.name, "email": input.email or ""}
+    if tool_context is not None and hasattr(tool_context, "state"):
         tool_context.state["customer_details"] = details
     return {
         "status": "success",

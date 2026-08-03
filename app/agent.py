@@ -144,7 +144,9 @@ async def record_user_issue_log(callback_context: CallbackContext) -> None:
         query_text = str(callback_context.user_content)
     elif callback_context.session and hasattr(callback_context.session, "events"):
         for event in reversed(callback_context.session.events):
-            if getattr(event, "author", "") == "user" and getattr(event, "content", None):
+            if getattr(event, "author", "") == "user" and getattr(
+                event, "content", None
+            ):
                 query_text = str(event.content)
                 break
 
