@@ -12,12 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from typing import Any
 
 import pytest
 from google.adk.sessions.database_session_service import DatabaseSessionService
 
-from app.agent import app, record_user_issue_log, root_agent
+from app.agent import (
+    app,
+    consolidate_user_memory,
+    record_user_issue_log,
+    root_agent,
+    schedule_memory_consolidation,
+)
 from app.app_utils.services import get_session_service
 from app.tools import (
     escalate_to_human,
@@ -107,9 +114,69 @@ async def test_record_user_issue_log_callback() -> None:
     # Verify customer_details remains unprefixed (ephemeral session scope)
     assert "customer_details" in ctx.state
 
+    # Allow scheduled background memory consolidation task to complete
+    await asyncio.sleep(0.01)
+    assert "user:consolidated_memory" in ctx.state
+    assert ctx.state["user:consolidated_memory"]["issue_count"] == 1
+
 
 def test_get_session_service_database() -> None:
     """Verify get_session_service returns DatabaseSessionService backed by SQLite."""
     service = get_session_service()
     assert isinstance(service, DatabaseSessionService)
+
+
+@pytest.mark.asyncio
+async def test_consolidate_user_memory() -> None:
+    """Verify that consolidate_user_memory summarizes issue logs into user:consolidated_memory."""
+    class DummyCallbackContext:
+        def __init__(self) -> None:
+            self.state: dict[str, Any] = {
+                "customer_details": {"user_id": "CUST-7777", "name": "Bob"},
+                "user:issue_logs": [
+                    {
+                        "user_id": "CUST-7777",
+                        "query": "First issue",
+                        "customer_details": {},
+                    },
+                    {
+                        "user_id": "CUST-7777",
+                        "query": "Second issue",
+                        "customer_details": {},
+                    },
+                ],
+            }
+
+    ctx = DummyCallbackContext()
+    await consolidate_user_memory(ctx)
+    assert "user:consolidated_memory" in ctx.state
+    consolidated = ctx.state["user:consolidated_memory"]
+    assert consolidated["user_id"] == "CUST-7777"
+    assert consolidated["issue_count"] == 2
+    assert "First issue" in consolidated["summary"]
+    assert "Second issue" in consolidated["summary"]
+
+
+@pytest.mark.asyncio
+async def test_schedule_memory_consolidation() -> None:
+    """Verify that schedule_memory_consolidation schedules an async background task."""
+    class DummyCallbackContext:
+        def __init__(self) -> None:
+            self.state: dict[str, Any] = {
+                "customer_details": {"user_id": "CUST-8888", "name": "Sara"},
+                "user:issue_logs": [
+                    {
+                        "user_id": "CUST-8888",
+                        "query": "Refund request",
+                        "customer_details": {},
+                    },
+                ],
+            }
+
+    ctx = DummyCallbackContext()
+    task = schedule_memory_consolidation(ctx)
+    assert task is not None
+    await task
+    assert "user:consolidated_memory" in ctx.state
+    assert ctx.state["user:consolidated_memory"]["issue_count"] == 1
 

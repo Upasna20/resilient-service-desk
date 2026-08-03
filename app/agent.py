@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import datetime
+from typing import Any
+
 from google.adk.agents import Agent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.apps import App
@@ -65,9 +69,65 @@ Customer details currently stored in session state:
 
 
 async def initialize_customer_state(callback_context: CallbackContext) -> None:
-    """Initialize customer_details in session state to preserve details across compaction."""
+    """Initialize customer_details and user:consolidated_memory in session state to preserve details across compaction."""
     if "customer_details" not in callback_context.state:
         callback_context.state["customer_details"] = {}
+    if "user:consolidated_memory" not in callback_context.state:
+        callback_context.state["user:consolidated_memory"] = {}
+
+
+async def consolidate_user_memory(callback_context: CallbackContext) -> None:
+    """Perform expensive memory consolidation asynchronously as a background task.
+
+    Summarizes and compresses user issue logs into persistent user-scoped
+    memory without blocking the immediate conversational response.
+    """
+    await asyncio.sleep(0)  # Yield control to the async event loop
+
+    issue_logs = callback_context.state.get("user:issue_logs", [])
+    if not isinstance(issue_logs, list) or not issue_logs:
+        return
+
+    customer_details = callback_context.state.get("customer_details", {})
+    user_id = customer_details.get("user_id", "UNKNOWN")
+
+    queries = [
+        str(log.get("query", ""))
+        for log in issue_logs
+        if isinstance(log, dict) and log.get("query")
+    ]
+
+    consolidated_memory = {
+        "user_id": user_id,
+        "issue_count": len(issue_logs),
+        "recent_queries": queries[-5:],
+        "summary": (
+            f"Consolidated profile for {user_id}: {len(issue_logs)} issue(s) logged. "
+            f"Recent queries: {'; '.join(queries[-3:])}"
+        ),
+        "last_consolidated_at": datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat(),
+    }
+
+    callback_context.state["user:consolidated_memory"] = consolidated_memory
+
+
+_background_tasks: set[asyncio.Task[Any]] = set()
+
+
+def schedule_memory_consolidation(
+    callback_context: CallbackContext,
+) -> asyncio.Task[Any] | None:
+    """Schedule expensive memory consolidation as a non-blocking background async task."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    task = loop.create_task(consolidate_user_memory(callback_context))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 async def record_user_issue_log(callback_context: CallbackContext) -> None:
@@ -95,6 +155,7 @@ async def record_user_issue_log(callback_context: CallbackContext) -> None:
     }
 
     callback_context.state["user:issue_logs"] = issue_logs + [log_entry]
+    schedule_memory_consolidation(callback_context)
 
 
 root_agent = Agent(
