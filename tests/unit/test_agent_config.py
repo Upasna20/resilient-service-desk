@@ -71,6 +71,10 @@ def test_root_agent_config() -> None:
     assert app.events_compaction_config.compaction_interval == 3
     assert app.events_compaction_config.overlap_size == 1
 
+    # Verify HITL resumability config
+    assert app.resumability_config is not None
+    assert app.resumability_config.is_resumable is True
+
     # Verify system instructions content and guardrails
     instruction = str(root_agent.instruction)
     assert "Lead Support Orchestrator" in instruction
@@ -241,3 +245,45 @@ async def test_schedule_memory_consolidation() -> None:
     await task
     assert "user:consolidated_memory" in ctx.state
     assert ctx.state["user:consolidated_memory"]["issue_count"] == 1
+
+
+def test_escalate_to_human_hitl_stop() -> None:
+    """Verify that escalate_to_human triggers a Human-in-the-Loop (HITL) execution stop when unconfirmed."""
+
+    class MockHITLContext:
+        def __init__(self, confirmed: Any = None) -> None:
+            self.state: dict[str, Any] = {"customer_details": {}}
+            self.tool_confirmation = confirmed
+            self.confirmation_requested = False
+
+        def request_confirmation(self, hint: str) -> None:
+            self.confirmation_requested = True
+
+    input_data = EscalationInput(
+        user_id="CUST-55555",
+        issue_summary="Refund dispute",
+        sentiment_score=0.1,
+    )
+
+    # 1. Unconfirmed state -> HITL stop triggered (pending_confirmation)
+    ctx_pending = MockHITLContext(confirmed=None)
+    res_pending = escalate_to_human(input_data, tool_context=ctx_pending)
+    assert res_pending["status"] == "pending_confirmation"
+    assert ctx_pending.confirmation_requested is True
+
+    # 2. Confirmed state -> proceeds to success
+    class ConfirmedPayload:
+        confirmed = True
+
+    ctx_approved = MockHITLContext(confirmed=ConfirmedPayload())
+    res_approved = escalate_to_human(input_data, tool_context=ctx_approved)
+    assert res_approved["status"] == "success"
+    assert res_approved["ticket_id"] == "TICKET-5555-URGENT"
+
+    # 3. Rejected state -> returns rejected status
+    class RejectedPayload:
+        confirmed = False
+
+    ctx_rejected = MockHITLContext(confirmed=RejectedPayload())
+    res_rejected = escalate_to_human(input_data, tool_context=ctx_rejected)
+    assert res_rejected["status"] == "rejected"

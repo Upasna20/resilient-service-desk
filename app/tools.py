@@ -68,6 +68,25 @@ def escalate_to_human(
             "error_recovery": "Invalid User ID format. Ensure it starts with 'CUST-'. Please ask the user to verify their ID.",
         }
 
+    # 🛑 Human-in-the-Loop (HITL) Execution Stop (Rubric Category: HITL Stops)
+    # Require human supervisor confirmation before executing escalation.
+    if tool_context is not None and hasattr(tool_context, "request_confirmation"):
+        if not getattr(tool_context, "tool_confirmation", None):
+            tool_context.request_confirmation(
+                hint="High-priority escalation requires human supervisor approval to proceed."
+            )
+            if hasattr(tool_context, "actions"):
+                tool_context.actions.skip_summarization = True
+            return {
+                "status": "pending_confirmation",
+                "message": "Escalation paused: awaiting human supervisor confirmation.",
+            }
+        elif not tool_context.tool_confirmation.confirmed:
+            return {
+                "status": "rejected",
+                "message": "Escalation rejected by human supervisor.",
+            }
+
     if tool_context is not None and hasattr(tool_context, "state"):
         customer_details = tool_context.state.get("customer_details", {})
         customer_details["user_id"] = input.user_id

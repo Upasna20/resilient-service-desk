@@ -20,7 +20,7 @@ from typing import Any
 from google.adk.agents import Agent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.apps import App
-from google.adk.apps.app import EventsCompactionConfig
+from google.adk.apps.app import EventsCompactionConfig, ResumabilityConfig
 from google.adk.models import Gemini
 from google.genai import types
 
@@ -229,6 +229,7 @@ root_agent = Agent(
 app = App(
     root_agent=root_agent,
     name="app",
+    resumability_config=ResumabilityConfig(is_resumable=True),
     events_compaction_config=EventsCompactionConfig(
         compaction_interval=3,
         overlap_size=1,
