@@ -32,6 +32,13 @@ from app.agent import (
     tool_execution_guardrail_callback,
     tool_output_sanitization_callback,
 )
+from app.app_utils.observability import (
+    clear_execution_logs,
+    get_recent_execution_logs,
+    log_intent_and_outcome,
+    redact_pii,
+    redact_pii_from_dict,
+)
 from app.app_utils.services import get_session_service
 from app.tools import (
     CustomerDetailsInput,
@@ -373,3 +380,34 @@ async def test_output_safety_guardrail_callback() -> None:
     await output_safety_guardrail_callback(None, res_hallucination)
     assert "lifetime warranty" not in res_hallucination.content.parts[0].text
     assert "30 days" in res_hallucination.content.parts[0].text
+
+
+def test_pii_redaction_mechanisms() -> None:
+    """Verify redact_pii and redact_pii_from_dict scrub credit cards, SSNs, and phone numbers."""
+    raw_text = "My SSN is 123-45-6789, card 4532 1234 5678 9012, phone (800) 555-0199."
+    redacted = redact_pii(raw_text)
+    assert "[REDACTED_SSN]" in redacted
+    assert "[REDACTED_CARD]" in redacted
+    assert "[REDACTED_PHONE]" in redacted
+    assert "123-45-6789" not in redacted
+    assert "4532 1234 5678 9012" not in redacted
+
+    raw_dict = {"notes": "password=secret_token_123", "normal": "hello"}
+    redacted_dict = redact_pii_from_dict(raw_dict)
+    assert "[REDACTED_SECRET]" in redacted_dict["notes"]
+    assert redacted_dict["normal"] == "hello"
+
+
+def test_intent_vs_outcome_structured_logging() -> None:
+    """Verify log_intent_and_outcome records structured intent/outcome entries with PII scrubbed."""
+    clear_execution_logs()
+    log_intent_and_outcome(
+        intent="test_intent",
+        outcome="test_outcome",
+        metadata={"card": "4532 0000 1111 2222"},
+    )
+    logs = get_recent_execution_logs()
+    assert len(logs) == 1
+    assert logs[0]["intent"] == "test_intent"
+    assert logs[0]["outcome"] == "test_outcome"
+    assert logs[0]["metadata"]["card"] == "[REDACTED_CARD]"

@@ -24,6 +24,11 @@ from google.adk.apps.app import EventsCompactionConfig, ResumabilityConfig
 from google.adk.models import Gemini, LlmResponse
 from google.genai import types
 
+from app.app_utils.observability import (
+    log_intent_and_outcome,
+    redact_pii,
+    redact_pii_from_dict,
+)
 from app.tools import (
     escalate_to_human,
     query_knowledge_base,
@@ -74,6 +79,10 @@ async def initialize_customer_state(callback_context: CallbackContext) -> None:
         callback_context.state["customer_details"] = {}
     if "user:consolidated_memory" not in callback_context.state:
         callback_context.state["user:consolidated_memory"] = {}
+    log_intent_and_outcome(
+        intent="initialize_session_state",
+        outcome="customer_state_initialized",
+    )
 
 
 async def consolidate_user_memory(callback_context: CallbackContext) -> None:
@@ -92,7 +101,7 @@ async def consolidate_user_memory(callback_context: CallbackContext) -> None:
     user_id = customer_details.get("user_id", "UNKNOWN")
 
     queries = [
-        str(log.get("query", ""))
+        redact_pii(str(log.get("query", "")))
         for log in issue_logs
         if isinstance(log, dict) and log.get("query")
     ]
@@ -101,7 +110,7 @@ async def consolidate_user_memory(callback_context: CallbackContext) -> None:
         "user_id": user_id,
         "issue_count": len(issue_logs),
         "recent_queries": queries[-5:],
-        "summary": (
+        "summary": redact_pii(
             f"Consolidated profile for {user_id}: {len(issue_logs)} issue(s) logged. "
             f"Recent queries: {'; '.join(queries[-3:])}"
         ),
@@ -111,6 +120,11 @@ async def consolidate_user_memory(callback_context: CallbackContext) -> None:
     }
 
     callback_context.state["user:consolidated_memory"] = consolidated_memory
+    log_intent_and_outcome(
+        intent="consolidate_user_memory",
+        outcome="memory_consolidated_with_pii_redaction",
+        metadata={"user_id": user_id, "issue_count": len(issue_logs)},
+    )
 
 
 _background_tasks: set[asyncio.Task[Any]] = set()
@@ -150,13 +164,20 @@ async def record_user_issue_log(callback_context: CallbackContext) -> None:
                 query_text = str(event.content)
                 break
 
+    redacted_query = redact_pii(query_text)
+    redacted_details = redact_pii_from_dict(customer_details)
     log_entry = {
         "user_id": user_id,
-        "query": query_text,
-        "customer_details": customer_details,
+        "query": redacted_query,
+        "customer_details": redacted_details,
     }
 
     callback_context.state["user:issue_logs"] = issue_logs + [log_entry]
+    log_intent_and_outcome(
+        intent="record_user_issue",
+        outcome="issue_logged_with_pii_redaction",
+        metadata={"user_id": user_id},
+    )
     schedule_memory_consolidation(callback_context)
 
 
@@ -211,6 +232,11 @@ async def input_guardrail_and_routing_callback(
         "hack",
     ]
     if any(keyword in user_content for keyword in prohibited_keywords):
+        log_intent_and_outcome(
+            intent="process_user_prompt",
+            outcome="blocked_by_input_guardrail",
+            severity="WARNING",
+        )
         return LlmResponse(
             content=types.Content(
                 role="model",
@@ -235,6 +261,17 @@ async def input_guardrail_and_routing_callback(
     ]
     if any(keyword in user_content for keyword in high_complexity_keywords):
         llm_request.model = "gemini-3.5-pro"
+        log_intent_and_outcome(
+            intent="model_routing",
+            outcome="routed_to_pro_model",
+            metadata={"model": "gemini-3.5-pro"},
+        )
+    else:
+        log_intent_and_outcome(
+            intent="model_routing",
+            outcome="default_model_selected",
+            metadata={"model": "gemini-3.5-flash"},
+        )
 
     return None
 

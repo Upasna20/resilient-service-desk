@@ -3,6 +3,12 @@ from typing import Any
 from google.adk.tools.tool_context import ToolContext
 from pydantic import BaseModel, Field
 
+from app.app_utils.observability import (
+    log_intent_and_outcome,
+    redact_pii,
+    redact_pii_from_dict,
+)
+
 
 # 📝 Contract 1: Escalation Schema (Explicit JSON Schema)
 class EscalationInput(BaseModel):
@@ -77,11 +83,24 @@ def escalate_to_human(
             )
             if hasattr(tool_context, "actions"):
                 tool_context.actions.skip_summarization = True
+            log_intent_and_outcome(
+                intent="escalate_ticket",
+                outcome="paused_for_hitl_confirmation",
+                metadata={
+                    "user_id": input.user_id,
+                    "issue_summary": redact_pii(input.issue_summary),
+                },
+            )
             return {
                 "status": "pending_confirmation",
                 "message": "Escalation paused: awaiting human supervisor confirmation.",
             }
         elif not tool_context.tool_confirmation.confirmed:
+            log_intent_and_outcome(
+                intent="escalate_ticket",
+                outcome="rejected_by_hitl_supervisor",
+                metadata={"user_id": input.user_id},
+            )
             return {
                 "status": "rejected",
                 "message": "Escalation rejected by human supervisor.",
@@ -92,9 +111,15 @@ def escalate_to_human(
         customer_details["user_id"] = input.user_id
         tool_context.state["customer_details"] = customer_details
 
+    ticket_id = f"TICKET-{input.user_id[-4:]}-URGENT"
+    log_intent_and_outcome(
+        intent="escalate_ticket",
+        outcome="ticket_enqueued",
+        metadata={"user_id": input.user_id, "ticket_id": ticket_id},
+    )
     return {
         "status": "success",
-        "ticket_id": f"TICKET-{input.user_id[-4:]}-URGENT",
+        "ticket_id": ticket_id,
         "message": "Ticket successfully enqueued in the Human Support Queue.",
     }
 
@@ -116,6 +141,11 @@ def query_knowledge_base(input: KBQueryInput) -> dict[str, Any]:
 
     # 🚨 Out of Scope Guardrail
     if not any(topic in input.search_query.lower() for topic in in_scope_topics):
+        log_intent_and_outcome(
+            intent="query_knowledge_base",
+            outcome="out_of_scope",
+            metadata={"query": redact_pii(input.search_query)},
+        )
         return {
             "status": "out_of_scope",
             "result": None,
@@ -128,12 +158,22 @@ def query_knowledge_base(input: KBQueryInput) -> dict[str, Any]:
 
     # 🚨 System Outage Simulation (Resilience)
     if "error" in input.search_query.lower():
+        log_intent_and_outcome(
+            intent="query_knowledge_base",
+            outcome="service_error",
+            metadata={"query": redact_pii(input.search_query)},
+        )
         return {
             "status": "error",
             "error_recovery": "The Knowledge Base is temporarily offline. Please advise the user of the outage and escalate to a human if urgent.",
         }
 
     # 🟢 Success Path
+    log_intent_and_outcome(
+        intent="query_knowledge_base",
+        outcome="faq_retrieved",
+        metadata={"query": redact_pii(input.search_query)},
+    )
     return {
         "status": "success",
         "result": "Standard shipping takes 3-5 business days. Returns are accepted within 30 days.",
@@ -165,9 +205,19 @@ def save_customer_details(
             ),
         }
 
-    details = {"user_id": input.user_id, "name": input.name, "email": input.email or ""}
+    raw_details = {
+        "user_id": input.user_id,
+        "name": input.name,
+        "email": input.email or "",
+    }
+    details = redact_pii_from_dict(raw_details)
     if tool_context is not None and hasattr(tool_context, "state"):
         tool_context.state["customer_details"] = details
+    log_intent_and_outcome(
+        intent="save_customer_details",
+        outcome="customer_details_persisted",
+        metadata={"user_id": input.user_id},
+    )
     return {
         "status": "success",
         "message": "Customer details saved to session state.",
