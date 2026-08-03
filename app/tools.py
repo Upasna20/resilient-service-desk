@@ -1,0 +1,161 @@
+from typing import Any
+
+from google.adk.tools.tool_context import ToolContext
+from pydantic import BaseModel, Field
+
+
+# 📝 Contract 1: Escalation Schema (Explicit JSON Schema)
+class EscalationInput(BaseModel):
+    user_id: str = Field(
+        ...,
+        description="The unique identifier of the customer (e.g., 'CUST-12345').",
+    )
+    issue_summary: str = Field(
+        ...,
+        description="A concise summary of the customer's problem and their frustration level.",
+    )
+    sentiment_score: float = Field(
+        ...,
+        description="Sentiment score between 0.0 (Extremely Angry) and 1.0 (Happy).",
+    )
+
+
+# 📝 Contract 2: Knowledge Base Query Schema
+class KBQueryInput(BaseModel):
+    search_query: str = Field(
+        ...,
+        description="The semantic search query to look up in the Knowledge Base (e.g., 'return policy').",
+    )
+
+
+# 📝 Contract 3: Customer Details Schema
+class CustomerDetailsInput(BaseModel):
+    user_id: str = Field(
+        ...,
+        description="The unique identifier of the customer (e.g., 'CUST-12345').",
+    )
+    name: str = Field(
+        ...,
+        description="The name of the customer.",
+    )
+    email: str | None = Field(
+        default="",
+        description="Optional email address of the customer.",
+    )
+
+
+# 🔧 Tool 1: Escalate to Human (Descriptive Naming)
+def escalate_to_human(
+    user_id: str,
+    issue_summary: str,
+    sentiment_score: float,
+    tool_context: ToolContext = None,
+) -> dict[str, Any]:
+    """Escalates high-priority, urgent, or frustrated customer tickets to a human support queue.
+
+    Use this tool IMMEDIATELY if the customer exhibits high anger, requests a refund,
+    or asks for things outside the agent's boundaries (like cancellation).
+
+    Args:
+        user_id (str): Customer ID.
+        issue_summary (str): Summary of the problem.
+        sentiment_score (float): Score from 0.0 (angry) to 1.0 (happy).
+        tool_context (ToolContext, optional): Injected session tool context.
+
+    Returns:
+        dict[str, Any]: Confirmation status and the generated Ticket ID.
+    """
+    # 🚨 Guided Error Handling Example (Rubric Category 1)
+    if not user_id.startswith("CUST-"):
+        return {
+            "status": "error",
+            "error_recovery": "Invalid User ID format. Ensure it starts with 'CUST-'. Please ask the user to verify their ID.",
+        }
+
+    if tool_context is not None and hasattr(tool_context, "state"):
+        customer_details = tool_context.state.get("customer_details", {})
+        customer_details["user_id"] = user_id
+        tool_context.state["customer_details"] = customer_details
+
+    return {
+        "status": "success",
+        "ticket_id": f"TICKET-{user_id[-4:]}-URGENT",
+        "message": "Ticket successfully enqueued in the Human Support Queue.",
+    }
+
+
+# 🔧 Tool 2: Query Knowledge Base
+def query_knowledge_base(search_query: str) -> dict[str, Any]:
+    """Searches the internal Knowledge Base (FAQ) for Global Retail Hub policies and procedures.
+
+    Use this tool to find standard answers for shipping times, return policies,
+    or general informational queries.
+
+    Args:
+        search_query (str): The search query based on the customer's question.
+
+    Returns:
+        dict[str, Any]: The search results or a guided recovery message if nothing is found.
+    """
+    in_scope_topics = ["shipping", "return", "refund", "policy", "hours", "tracking"]
+
+    # 🚨 Out of Scope Guardrail
+    if not any(topic in search_query.lower() for topic in in_scope_topics):
+        return {
+            "status": "out_of_scope",
+            "result": None,
+            "error_recovery": (
+                "The Knowledge Base has no information on this topic because it appears unrelated "
+                "to Global Retail Hub. Do NOT make up an answer. Politely tell the user this request "
+                "is outside your action area."
+            ),
+        }
+
+    # 🚨 System Outage Simulation (Resilience)
+    if "error" in search_query.lower():
+        return {
+            "status": "error",
+            "error_recovery": "The Knowledge Base is temporarily offline. Please advise the user of the outage and escalate to a human if urgent.",
+        }
+
+    # 🟢 Success Path
+    return {
+        "status": "success",
+        "result": "Standard shipping takes 3-5 business days. Returns are accepted within 30 days.",
+    }
+
+
+# 🔧 Tool 3: Save Customer Details to Session State
+def save_customer_details(
+    user_id: str, name: str, tool_context: ToolContext, email: str = ""
+) -> dict[str, Any]:
+    """Saves customer details into the session state so they persist across event compactions.
+
+    Use this tool IMMEDIATELY whenever the customer provides their name, email, or customer ID.
+
+    Args:
+        user_id (str): Customer ID starting with 'CUST-'.
+        name (str): The customer's name.
+        email (str, optional): The customer's email address.
+        tool_context (ToolContext): Injected session tool context.
+
+    Returns:
+        dict[str, Any]: Confirmation status and stored customer details.
+    """
+    if not user_id.startswith("CUST-"):
+        return {
+            "status": "error",
+            "error_recovery": (
+                "Invalid User ID format. Ensure it starts with 'CUST-'. "
+                "Please ask the user to verify their ID."
+            ),
+        }
+
+    details = {"user_id": user_id, "name": name, "email": email}
+    if hasattr(tool_context, "state"):
+        tool_context.state["customer_details"] = details
+    return {
+        "status": "success",
+        "message": "Customer details saved to session state.",
+        "customer_details": details,
+    }

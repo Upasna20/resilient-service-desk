@@ -1,0 +1,115 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from typing import Any
+
+import pytest
+from google.adk.sessions.database_session_service import DatabaseSessionService
+
+from app.agent import app, record_user_issue_log, root_agent
+from app.app_utils.services import get_session_service
+from app.tools import (
+    escalate_to_human,
+    query_knowledge_base,
+    save_customer_details,
+)
+
+
+def test_root_agent_config() -> None:
+    """Test that root_agent is configured according to requirements."""
+    assert root_agent.name == "support_coordinator"
+    assert root_agent.model.model == "gemini-3.5-flash"
+
+    # Verify tool registration
+    registered_tools = list(root_agent.tools)
+    assert escalate_to_human in registered_tools
+    assert query_knowledge_base in registered_tools
+    assert save_customer_details in registered_tools
+    assert len(registered_tools) == 3
+
+    # Verify callbacks and compaction policy
+    assert root_agent.before_agent_callback is not None
+    assert root_agent.after_agent_callback is not None
+    assert app.events_compaction_config is not None
+    assert app.events_compaction_config.compaction_interval == 3
+    assert app.events_compaction_config.overlap_size == 1
+
+    # Verify system instructions content and guardrails
+    instruction = root_agent.instruction
+    assert "Lead Support Orchestrator" in instruction
+    assert "Global Retail Hub" in instruction
+    assert "Customer details currently stored in session state" in instruction
+    assert "escalate_to_human" in instruction
+    assert "query_knowledge_base" in instruction
+    assert "save_customer_details" in instruction
+    assert "frustration" in instruction.lower() or "anger" in instruction.lower()
+    assert "outside" in instruction.lower()
+    assert "hallucinate" in instruction.lower() or "fabricate" in instruction.lower()
+
+
+def test_save_customer_details_state_persistence() -> None:
+    """Verify that save_customer_details writes into tool_context.state."""
+    class DummyContext:
+        def __init__(self) -> None:
+            self.state: dict[str, Any] = {}
+
+    ctx = DummyContext()
+    res = save_customer_details("CUST-12345", "Alice", ctx, email="alice@example.com")
+    assert res["status"] == "success"
+    assert ctx.state["customer_details"] == {
+        "user_id": "CUST-12345",
+        "name": "Alice",
+        "email": "alice@example.com",
+    }
+
+
+def test_escalate_to_human_state_persistence() -> None:
+    """Verify that escalate_to_human updates user_id in tool_context.state when provided."""
+    class DummyContext:
+        def __init__(self) -> None:
+            self.state: dict[str, Any] = {"customer_details": {}}
+
+    ctx = DummyContext()
+    res = escalate_to_human("CUST-99999", "Broken item", 0.1, tool_context=ctx)
+    assert res["status"] == "success"
+    assert ctx.state["customer_details"]["user_id"] == "CUST-99999"
+
+
+@pytest.mark.asyncio
+async def test_record_user_issue_log_callback() -> None:
+    """Verify after_agent_callback captures turn summary into user-scoped persistent state."""
+    class DummyCallbackContext:
+        def __init__(self) -> None:
+            self.state: dict[str, Any] = {
+                "customer_details": {"user_id": "CUST-4444", "name": "Eve"}
+            }
+            self.user_content = "Please help with refund"
+            self.session = None
+
+    ctx = DummyCallbackContext()
+    await record_user_issue_log(ctx)
+    assert "user:issue_logs" in ctx.state
+    assert len(ctx.state["user:issue_logs"]) == 1
+    log_item = ctx.state["user:issue_logs"][0]
+    assert log_item["user_id"] == "CUST-4444"
+    assert log_item["query"] == "Please help with refund"
+    # Verify customer_details remains unprefixed (ephemeral session scope)
+    assert "customer_details" in ctx.state
+
+
+def test_get_session_service_database() -> None:
+    """Verify get_session_service returns DatabaseSessionService backed by SQLite."""
+    service = get_session_service()
+    assert isinstance(service, DatabaseSessionService)
+
