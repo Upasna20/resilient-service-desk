@@ -160,6 +160,58 @@ async def record_user_issue_log(callback_context: CallbackContext) -> None:
     schedule_memory_consolidation(callback_context)
 
 
+KB_SPECIALIST_INSTRUCTION = """
+You are the Knowledge Base Specialist for Global Retail Hub.
+Your sole responsibility is to search the internal Knowledge Base (FAQ) for Global Retail Hub policies, store hours, shipping times, and return procedures using the `query_knowledge_base` tool.
+Answer clearly and accurately based only on retrieved facts. Never make up or hallucinate policies.
+If a request is outside Global Retail Hub FAQ scope, state that it is outside retail support.
+"""
+
+ESCALATION_SPECIALIST_INSTRUCTION = """
+You are the Escalation & De-escalation Specialist for Global Retail Hub.
+Your role is to handle angry, frustrated customers, refund disputes, or urgent issues that require human intervention.
+1. Evaluate customer sentiment from 0.0 (Extremely Angry) to 1.0 (Happy).
+2. Before calling `escalate_to_human`, verify you have the customer's `user_id`. If not provided, ask for their User ID starting with 'CUST-'.
+3. Invoke `escalate_to_human` immediately for sentiment below 0.3 or refund/cancellation demands.
+"""
+
+kb_specialist = Agent(
+    name="kb_specialist",
+    model="gemini-3.5-flash-lite",
+    description="Specialist agent that searches the internal Knowledge Base (FAQ) for Global Retail Hub store hours, shipping times, return policies, and standard procedures.",
+    instruction=KB_SPECIALIST_INSTRUCTION,
+    tools=[query_knowledge_base],
+)
+
+escalation_specialist = Agent(
+    name="escalation_specialist",
+    model="gemini-3.5-pro",
+    description="Specialist agent that handles customer escalations, urgent refund requests, angry/frustrated users, or issues outside standard retail policies.",
+    instruction=ESCALATION_SPECIALIST_INSTRUCTION,
+    tools=[escalate_to_human],
+)
+
+
+async def dynamic_model_routing_callback(
+    callback_context: CallbackContext, llm_request: Any
+) -> Any:
+    """Dynamic model routing callback that upgrades model tier for high complexity/frustration."""
+    user_content = str(callback_context.user_content or "").lower()
+    high_complexity_keywords = [
+        "manager",
+        "furious",
+        "lawyer",
+        "unacceptable",
+        "refund",
+        "emergency",
+        "angry",
+        "urgent",
+    ]
+    if any(keyword in user_content for keyword in high_complexity_keywords):
+        llm_request.model = "gemini-3.5-pro"
+    return None
+
+
 root_agent = Agent(
     name="support_coordinator",
     model=Gemini(
@@ -168,7 +220,9 @@ root_agent = Agent(
     ),
     instruction=SUPPORT_COORDINATOR_INSTRUCTION,
     tools=[escalate_to_human, query_knowledge_base, save_customer_details],
+    sub_agents=[kb_specialist, escalation_specialist],
     before_agent_callback=initialize_customer_state,
+    before_model_callback=dynamic_model_routing_callback,
     after_agent_callback=record_user_issue_log,
 )
 

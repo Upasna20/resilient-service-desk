@@ -21,6 +21,9 @@ from google.adk.sessions.database_session_service import DatabaseSessionService
 from app.agent import (
     app,
     consolidate_user_memory,
+    dynamic_model_routing_callback,
+    escalation_specialist,
+    kb_specialist,
     record_user_issue_log,
     root_agent,
     schedule_memory_consolidation,
@@ -47,6 +50,20 @@ def test_root_agent_config() -> None:
     assert save_customer_details in registered_tools
     assert len(registered_tools) == 3
 
+    # Verify multi-agent hierarchy and sub-agent configuration
+    sub_agent_map = {agent.name: agent for agent in root_agent.sub_agents}
+    assert "kb_specialist" in sub_agent_map
+    assert "escalation_specialist" in sub_agent_map
+    assert sub_agent_map["kb_specialist"] is kb_specialist
+    assert sub_agent_map["escalation_specialist"] is escalation_specialist
+    assert sub_agent_map["kb_specialist"].model == "gemini-3.5-flash-lite"
+    assert sub_agent_map["escalation_specialist"].model == "gemini-3.5-pro"
+    assert query_knowledge_base in list(sub_agent_map["kb_specialist"].tools)
+    assert escalate_to_human in list(sub_agent_map["escalation_specialist"].tools)
+
+    # Verify dynamic model routing callback
+    assert root_agent.before_model_callback is not None
+
     # Verify callbacks and compaction policy
     assert root_agent.before_agent_callback is not None
     assert root_agent.after_agent_callback is not None
@@ -65,6 +82,34 @@ def test_root_agent_config() -> None:
     assert "frustration" in instruction.lower() or "anger" in instruction.lower()
     assert "outside" in instruction.lower()
     assert "hallucinate" in instruction.lower() or "fabricate" in instruction.lower()
+
+
+@pytest.mark.asyncio
+async def test_dynamic_model_routing_callback() -> None:
+    """Verify before_model_callback dynamically routes high complexity/frustration queries to gemini-3.5-pro."""
+
+    class DummyCallbackContext:
+        def __init__(self, text: str) -> None:
+            self.user_content = text
+            self.state: dict[str, Any] = {}
+
+    class DummyRequest:
+        def __init__(self, model: str) -> None:
+            self.model = model
+
+    # Normal query remains on default model
+    ctx_normal = DummyCallbackContext("What are your store hours?")
+    req_normal = DummyRequest("gemini-3.5-flash")
+    await dynamic_model_routing_callback(ctx_normal, req_normal)
+    assert req_normal.model == "gemini-3.5-flash"
+
+    # High frustration/complexity query routes to pro model
+    ctx_urgent = DummyCallbackContext(
+        "I am furious, I need a manager and refund immediately!"
+    )
+    req_urgent = DummyRequest("gemini-3.5-flash")
+    await dynamic_model_routing_callback(ctx_urgent, req_urgent)
+    assert req_urgent.model == "gemini-3.5-pro"
 
 
 def test_save_customer_details_state_persistence() -> None:
